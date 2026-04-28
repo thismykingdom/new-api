@@ -6,6 +6,7 @@ import {
   buildChatCompletionPayload,
   updateAssistantMessageWithError,
   updateLastAssistantMessage,
+  updateCurrentVersionContent,
   processStreamingContent,
   finalizeMessage,
 } from '../lib'
@@ -30,10 +31,19 @@ export function useChatHandler({
 
   // Handle stream update
   const handleStreamUpdate = useCallback(
-    (type: 'reasoning' | 'content', chunk: string) => {
+    (type: 'reasoning' | 'content' | 'replace', chunk: string) => {
       onMessageUpdate((prev) =>
         updateLastAssistantMessage(prev, (message) => {
           if (message.status === MESSAGE_STATUS.ERROR) return message
+
+          if (type === 'replace') {
+            return {
+              ...processStreamingContent(
+                updateCurrentVersionContent(message, chunk)
+              ),
+              status: MESSAGE_STATUS.STREAMING,
+            }
+          }
 
           if (type === 'reasoning') {
             // Direct API reasoning_content

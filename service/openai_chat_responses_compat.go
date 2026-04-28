@@ -16,3 +16,11 @@ func ResponsesResponseToChatCompletionsResponse(resp *dto.OpenAIResponsesRespons
 func ExtractOutputTextFromResponses(resp *dto.OpenAIResponsesResponse) string {
 	return openaicompat.ExtractOutputTextFromResponses(resp)
 }
+
+func BuildChatCompletionsMessageContentFromResponses(resp *dto.OpenAIResponsesResponse) any {
+	return openaicompat.BuildChatCompletionsMessageContentFromResponses(resp)
+}
+
+func BuildChatCompletionsMessageContentFromResponsesOutputs(outputs []dto.ResponsesOutput, text string) any {
+	return openaicompat.BuildChatCompletionsMessageContentFromResponsesOutputs(outputs, text)
+}

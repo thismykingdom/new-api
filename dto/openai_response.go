@@ -146,6 +146,7 @@ type ChatCompletionsStreamResponse struct {
 	Model             string                                `json:"model"`
 	SystemFingerprint *string                               `json:"system_fingerprint"`
 	Choices           []ChatCompletionsStreamResponseChoice `json:"choices"`
+	MessageContent    any                                   `json:"message_content,omitempty"`
 	Usage             *Usage                                `json:"usage"`
 }
 
@@ -193,6 +194,7 @@ func (c *ChatCompletionsStreamResponse) Copy() *ChatCompletionsStreamResponse {
 		Model:             c.Model,
 		SystemFingerprint: c.SystemFingerprint,
 		Choices:           choices,
+		MessageContent:    c.MessageContent,
 		Usage:             c.Usage,
 	}
 }
@@ -338,16 +340,23 @@ type IncompleteDetails struct {
 }
 
 type ResponsesOutput struct {
-	Type      string                   `json:"type"`
-	ID        string                   `json:"id"`
-	Status    string                   `json:"status"`
-	Role      string                   `json:"role"`
-	Content   []ResponsesOutputContent `json:"content"`
-	Quality   string                   `json:"quality"`
-	Size      string                   `json:"size"`
-	CallId    string                   `json:"call_id,omitempty"`
-	Name      string                   `json:"name,omitempty"`
-	Arguments json.RawMessage          `json:"arguments,omitempty"`
+	Type          string                   `json:"type"`
+	ID            string                   `json:"id"`
+	Status        string                   `json:"status"`
+	Role          string                   `json:"role"`
+	Content       []ResponsesOutputContent `json:"content"`
+	Quality       string                   `json:"quality"`
+	Size          string                   `json:"size"`
+	Result        json.RawMessage          `json:"result,omitempty"`
+	Data          json.RawMessage          `json:"data,omitempty"`
+	ImageURL      any                      `json:"image_url,omitempty"`
+	Url           string                   `json:"url,omitempty"`
+	B64Json       string                   `json:"b64_json,omitempty"`
+	MimeType      string                   `json:"mime_type,omitempty"`
+	RevisedPrompt string                   `json:"revised_prompt,omitempty"`
+	CallId        string                   `json:"call_id,omitempty"`
+	Name          string                   `json:"name,omitempty"`
+	Arguments     json.RawMessage          `json:"arguments,omitempty"`
 }
 
 // ArgumentsString returns function call arguments in the string form expected by Chat Completions.

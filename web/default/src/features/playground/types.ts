@@ -38,6 +38,8 @@ export interface ContentPart {
   }
 }
 
+export type ChatMessageContent = string | ContentPart[]
+
 export interface ChatCompletionRequest {
   model: string
   group?: string
@@ -56,6 +58,7 @@ export interface ChatCompletionChunk {
   object: string
   created: number
   model: string
+  message_content?: ChatMessageContent
   choices: Array<{
     index: number
     delta: {

@@ -134,6 +134,63 @@ export const useApiRequest = (
     [setMessage, applyAutoCollapseLogic],
   );
 
+  const replaceStreamMessageContent = useCallback(
+    (messageContent) => {
+      setMessage((prevMessage) => {
+        const lastMessage = prevMessage[prevMessage.length - 1];
+        if (!lastMessage) return prevMessage;
+        if (lastMessage.role !== 'assistant') return prevMessage;
+        if (lastMessage.status === MESSAGE_STATUS.ERROR) {
+          return prevMessage;
+        }
+
+        let nextContent = messageContent;
+        let nextReasoningContent = lastMessage.reasoningContent || '';
+
+        if (Array.isArray(messageContent)) {
+          nextContent = messageContent.map((item) => ({ ...item }));
+          const textItemIndex = nextContent.findIndex(
+            (item) => item.type === 'text' && typeof item.text === 'string',
+          );
+          if (textItemIndex !== -1) {
+            const processed = processThinkTags(
+              nextContent[textItemIndex].text,
+              nextReasoningContent,
+            );
+            nextReasoningContent = processed.reasoningContent;
+            nextContent[textItemIndex] = {
+              ...nextContent[textItemIndex],
+              text: processed.content,
+            };
+          }
+        } else if (typeof messageContent === 'string') {
+          const processed = processThinkTags(
+            messageContent,
+            nextReasoningContent,
+          );
+          nextContent = processed.content;
+          nextReasoningContent = processed.reasoningContent;
+        }
+
+        const nextStatus =
+          lastMessage.status === MESSAGE_STATUS.LOADING
+            ? MESSAGE_STATUS.INCOMPLETE
+            : lastMessage.status;
+
+        return [
+          ...prevMessage.slice(0, -1),
+          {
+            ...lastMessage,
+            content: nextContent,
+            reasoningContent: nextReasoningContent,
+            status: nextStatus,
+          },
+        ];
+      });
+    },
+    [setMessage],
+  );
+
   // 完成消息
   const completeMessage = useCallback(
     (status = MESSAGE_STATUS.COMPLETE) => {
@@ -327,9 +384,19 @@ export const useApiRequest = (
       let responseData = '';
       let hasReceivedFirstResponse = false;
       let isStreamComplete = false; // 添加标志位跟踪流是否正常完成
+      let hasReceivedTerminalChunk = false;
 
       source.addEventListener('message', (e) => {
-        if (e.data === '[DONE]') {
+        const rawData =
+          typeof e.data === 'string'
+            ? e.data.trim()
+            : String(e.data || '').trim();
+
+        if (rawData === '') {
+          return;
+        }
+
+        if (rawData === '[DONE]') {
           isStreamComplete = true; // 标记流正常完成
           source.close();
           sseSourceRef.current = null;
@@ -344,8 +411,12 @@ export const useApiRequest = (
         }
 
         try {
-          const payload = JSON.parse(e.data);
-          responseData += e.data + '\n';
+          if (!(rawData.startsWith('{') || rawData.startsWith('['))) {
+            return;
+          }
+
+          const payload = JSON.parse(rawData);
+          responseData += rawData + '\n';
 
           if (!hasReceivedFirstResponse) {
             setActiveDebugTab(DEBUG_TABS.RESPONSE);
@@ -355,10 +426,13 @@ export const useApiRequest = (
           // 新增：将 SSE 消息添加到数组
           setDebugData((prev) => ({
             ...prev,
-            sseMessages: [...(prev.sseMessages || []), e.data],
+            sseMessages: [...(prev.sseMessages || []), rawData],
           }));
 
           const delta = payload.choices?.[0]?.delta;
+          if (payload.message_content !== undefined) {
+            replaceStreamMessageContent(payload.message_content);
+          }
           if (delta) {
             if (delta.reasoning_content) {
               streamMessageUpdate(delta.reasoning_content, 'reasoning');
@@ -370,6 +444,12 @@ export const useApiRequest = (
               streamMessageUpdate(delta.content, 'content');
             }
           }
+          if (
+            payload.usage ||
+            payload.choices?.some((choice) => choice.finish_reason)
+          ) {
+            hasReceivedTerminalChunk = true;
+          }
         } catch (error) {
           console.error('Failed to parse SSE message:', error);
           const errorInfo = `解析错误: ${error.message}`;
@@ -377,7 +457,7 @@ export const useApiRequest = (
           setDebugData((prev) => ({
             ...prev,
             response: responseData + `\n\nError: ${errorInfo}`,
-            sseMessages: [...(prev.sseMessages || []), e.data], // 即使解析失败也保存原始数据
+            sseMessages: [...(prev.sseMessages || []), rawData], // 即使解析失败也保存原始数据
             isStreaming: false,
           }));
           setActiveDebugTab(DEBUG_TABS.RESPONSE);
@@ -390,6 +470,19 @@ export const useApiRequest = (
       source.addEventListener('error', (e) => {
         // 只有在流没有正常完成且连接状态异常时才处理错误
         if (!isStreamComplete && source.readyState !== 2) {
+          if (hasReceivedTerminalChunk) {
+            isStreamComplete = true;
+            sseSourceRef.current = null;
+            source.close();
+            setDebugData((prev) => ({
+              ...prev,
+              response: responseData,
+              isStreaming: false,
+            }));
+            completeMessage();
+            return;
+          }
+
           console.error('SSE Error:', e);
           let errorMessage = e.data || t('请求发生错误');
           let errorCode = null;
@@ -422,9 +515,15 @@ export const useApiRequest = (
             const newMessages = [...prevMessage];
             const lastMessage = newMessages[newMessages.length - 1];
             if (lastMessage && lastMessage.status !== MESSAGE_STATUS.COMPLETE && lastMessage.status !== MESSAGE_STATUS.ERROR) {
+              const nextContent = Array.isArray(lastMessage.content)
+                ? [
+                    ...lastMessage.content,
+                    { type: 'text', text: errorMessage },
+                  ]
+                : (lastMessage.content || '') + errorMessage;
               newMessages[newMessages.length - 1] = {
                 ...lastMessage,
-                content: (lastMessage.content || '') + errorMessage,
+                content: nextContent,
                 errorCode: errorCode,
                 status: MESSAGE_STATUS.ERROR,
               };
@@ -483,6 +582,7 @@ export const useApiRequest = (
       setDebugData,
       setActiveDebugTab,
       setMessage,
+      replaceStreamMessageContent,
       streamMessageUpdate,
       completeMessage,
       t,
@@ -507,10 +607,16 @@ export const useApiRequest = (
         lastMessage.status === MESSAGE_STATUS.LOADING ||
         lastMessage.status === MESSAGE_STATUS.INCOMPLETE
       ) {
-        const processed = processIncompleteThinkTags(
-          lastMessage.content || '',
-          lastMessage.reasoningContent || '',
-        );
+        const processed =
+          typeof lastMessage.content === 'string'
+            ? processIncompleteThinkTags(
+                lastMessage.content || '',
+                lastMessage.reasoningContent || '',
+              )
+            : {
+                content: lastMessage.content,
+                reasoningContent: lastMessage.reasoningContent || '',
+              };
 
         const autoCollapseState = applyAutoCollapseLogic(lastMessage, true);
 

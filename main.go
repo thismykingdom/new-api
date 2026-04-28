@@ -290,6 +290,7 @@ func InitResources() error {
 
 	// 清理旧的磁盘缓存文件
 	common.CleanupOldCacheFiles()
+	common.StartGeneratedImageCleanupTask()
 
 	// 初始化模型
 	model.GetPricing()

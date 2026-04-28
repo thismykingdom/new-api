@@ -4,6 +4,39 @@ import { getCommonHeaders } from '@/lib/api'
 import { API_ENDPOINTS, ERROR_MESSAGES } from '../constants'
 import type { ChatCompletionRequest, ChatCompletionChunk } from '../types'
 
+type StreamUpdateType = 'reasoning' | 'content' | 'replace'
+
+function chatMessageContentToText(content: unknown): string {
+  if (typeof content === 'string') {
+    return content
+  }
+
+  if (!Array.isArray(content)) {
+    return ''
+  }
+
+  return content
+    .map((part) => {
+      if (!part || typeof part !== 'object') {
+        return ''
+      }
+      const item = part as {
+        type?: string
+        text?: string
+        image_url?: { url?: string }
+      }
+      if (item.type === 'text') {
+        return item.text || ''
+      }
+      if (item.type === 'image_url' && item.image_url?.url) {
+        return `![generated image](${item.image_url.url})`
+      }
+      return ''
+    })
+    .filter(Boolean)
+    .join('\n\n')
+}
+
 /**
  * Hook for handling streaming chat completion requests
  */
@@ -14,7 +47,7 @@ export function useStreamRequest() {
   const sendStreamRequest = useCallback(
     (
       payload: ChatCompletionRequest,
-      onUpdate: (type: 'reasoning' | 'content', chunk: string) => void,
+      onUpdate: (type: StreamUpdateType, chunk: string) => void,
       onComplete: () => void,
       onError: (error: string, errorCode?: string) => void
     ) => {
@@ -26,6 +59,7 @@ export function useStreamRequest() {
 
       sseSourceRef.current = source
       isStreamCompleteRef.current = false
+      let hasReceivedTerminalChunk = false
 
       const closeSource = () => {
         source.close()
@@ -40,7 +74,16 @@ export function useStreamRequest() {
       }
 
       source.addEventListener('message', (e: MessageEvent) => {
-        if (e.data === '[DONE]') {
+        const rawData =
+          typeof e.data === 'string'
+            ? e.data.trim()
+            : String(e.data || '').trim()
+
+        if (rawData === '') {
+          return
+        }
+
+        if (rawData === '[DONE]') {
           isStreamCompleteRef.current = true
           closeSource()
           onComplete()
@@ -48,8 +91,16 @@ export function useStreamRequest() {
         }
 
         try {
-          const chunk: ChatCompletionChunk = JSON.parse(e.data)
+          if (!(rawData.startsWith('{') || rawData.startsWith('['))) {
+            return
+          }
+
+          const chunk: ChatCompletionChunk = JSON.parse(rawData)
           const delta = chunk.choices?.[0]?.delta
+
+          if (chunk.message_content !== undefined) {
+            onUpdate('replace', chatMessageContentToText(chunk.message_content))
+          }
 
           if (delta) {
             if (delta.reasoning_content) {
@@ -59,6 +110,13 @@ export function useStreamRequest() {
               onUpdate('content', delta.content)
             }
           }
+
+          if (
+            'usage' in chunk ||
+            chunk.choices?.some((choice) => choice.finish_reason)
+          ) {
+            hasReceivedTerminalChunk = true
+          }
         } catch (error) {
           // eslint-disable-next-line no-console
           console.error('Failed to parse SSE message:', error)
@@ -67,6 +125,13 @@ export function useStreamRequest() {
       })
 
       source.addEventListener('error', (e: Event & { data?: string }) => {
+        if (!isStreamCompleteRef.current && hasReceivedTerminalChunk) {
+          isStreamCompleteRef.current = true
+          closeSource()
+          onComplete()
+          return
+        }
+
         // Only handle errors if stream didn't complete normally
         if (source.readyState !== 2) {
           // eslint-disable-next-line no-console

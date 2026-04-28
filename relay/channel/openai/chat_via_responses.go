@@ -102,13 +102,14 @@ func OaiResponsesToChatStreamHandler(c *gin.Context, info *relaycommon.RelayInfo
 	model := info.UpstreamModelName
 
 	var (
-		usage       = &dto.Usage{}
-		outputText  strings.Builder
-		usageText   strings.Builder
-		sentStart   bool
-		sentStop    bool
-		sawToolCall bool
-		streamErr   *types.NewAPIError
+		usage            = &dto.Usage{}
+		outputText       strings.Builder
+		usageText        strings.Builder
+		sentStart        bool
+		sentStop         bool
+		sawToolCall      bool
+		streamErr        *types.NewAPIError
+		collectedOutputs []dto.ResponsesOutput
 	)
 
 	toolCallIndexByID := make(map[string]int)
@@ -118,7 +119,7 @@ func OaiResponsesToChatStreamHandler(c *gin.Context, info *relaycommon.RelayInfo
 	toolCallCanonicalIDByItemID := make(map[string]string)
 	hasSentReasoningSummary := false
 	needsReasoningSummarySeparator := false
-	//reasoningSummaryTextByKey := make(map[string]string)
+	reasoningSummaryTextByKey := make(map[string]string)
 
 	if info.RelayFormat == types.RelayFormatClaude && info.ClaudeConvertInfo == nil {
 		info.ClaudeConvertInfo = &relaycommon.ClaudeConvertInfo{LastMessagesType: relaycommon.LastMessageTypeNone}
@@ -157,6 +158,70 @@ func OaiResponsesToChatStreamHandler(c *gin.Context, info *relaycommon.RelayInfo
 		}
 		sentStart = true
 		return true
+	}
+
+	hasImageMessageContent := func(content any) bool {
+		switch v := content.(type) {
+		case string:
+			return strings.Contains(v, "![generated image](") || strings.Contains(v, common.GeneratedImageRoutePrefix)
+		case []dto.MediaContent:
+			for _, item := range v {
+				if item.Type == dto.ContentTypeImageURL {
+					return true
+				}
+			}
+		}
+		return false
+	}
+
+	sendMessageContentChunk := func(content any) bool {
+		if text, ok := content.(string); ok {
+			delta := stringDeltaFromPrefix(outputText.String(), text)
+			if delta == "" {
+				return true
+			}
+			if !sendStartIfNeeded() {
+				return false
+			}
+			usageText.WriteString(delta)
+			chunk := &dto.ChatCompletionsStreamResponse{
+				Id:      responseId,
+				Object:  "chat.completion.chunk",
+				Created: createAt,
+				Model:   model,
+				Choices: []dto.ChatCompletionsStreamResponseChoice{
+					{
+						Index: 0,
+						Delta: dto.ChatCompletionsStreamResponseChoiceDelta{
+							Content: &delta,
+						},
+					},
+				},
+			}
+			return sendChatChunk(chunk)
+		}
+
+		if !hasImageMessageContent(content) {
+			return true
+		}
+		if !sendStartIfNeeded() {
+			return false
+		}
+
+		chunk := &dto.ChatCompletionsStreamResponse{
+			Id:      responseId,
+			Object:  "chat.completion.chunk",
+			Created: createAt,
+			Model:   model,
+			Choices: []dto.ChatCompletionsStreamResponseChoice{
+				{
+					Index: 0,
+					Delta: dto.ChatCompletionsStreamResponseChoiceDelta{},
+				},
+			},
+			MessageContent: content,
+		}
+		return sendChatChunk(chunk)
 	}
 
 	//sendReasoningDelta := func(delta string) bool {
@@ -339,23 +404,22 @@ func OaiResponsesToChatStreamHandler(c *gin.Context, info *relaycommon.RelayInfo
 				needsReasoningSummarySeparator = true
 			}
 
-		//case "response.reasoning_summary_part.added", "response.reasoning_summary_part.done":
-		//	key := responsesStreamIndexKey(strings.TrimSpace(streamResp.ItemID), streamResp.SummaryIndex)
-		//	if key == "" || streamResp.Part == nil {
-		//		break
-		//	}
-		//	// Only handle summary text parts, ignore other part types.
-		//	if streamResp.Part.Type != "" && streamResp.Part.Type != "summary_text" {
-		//		break
-		//	}
-		//	prev := reasoningSummaryTextByKey[key]
-		//	next := streamResp.Part.Text
-		//	delta := stringDeltaFromPrefix(prev, next)
-		//	reasoningSummaryTextByKey[key] = next
-		//	if !sendReasoningSummaryDelta(delta) {
-		//		sr.Stop(streamErr)
-		//		return
-		//	}
+		case "response.reasoning_summary_part.added", "response.reasoning_summary_part.done":
+			key := responsesStreamIndexKey(strings.TrimSpace(streamResp.ItemID), streamResp.SummaryIndex)
+			if key == "" || streamResp.Part == nil {
+				break
+			}
+			if streamResp.Part.Type != "" && streamResp.Part.Type != "summary_text" {
+				break
+			}
+			prev := reasoningSummaryTextByKey[key]
+			next := streamResp.Part.Text
+			delta := stringDeltaFromPrefix(prev, next)
+			reasoningSummaryTextByKey[key] = next
+			if !sendReasoningSummaryDelta(delta) {
+				sr.Stop(streamErr)
+				return
+			}
 
 		case "response.output_text.delta":
 			if !sendStartIfNeeded() {
@@ -389,6 +453,14 @@ func OaiResponsesToChatStreamHandler(c *gin.Context, info *relaycommon.RelayInfo
 
 		case "response.output_item.added", "response.output_item.done":
 			if streamResp.Item == nil {
+				break
+			}
+			if streamResp.Item.Type == dto.ResponsesOutputTypeImageGenerationCall {
+				if !sendStartIfNeeded() {
+					sr.Stop(streamErr)
+					return
+				}
+				collectedOutputs = append(collectedOutputs, *streamResp.Item)
 				break
 			}
 			if streamResp.Item.Type != "function_call" {
@@ -443,6 +515,7 @@ func OaiResponsesToChatStreamHandler(c *gin.Context, info *relaycommon.RelayInfo
 		case "response.function_call_arguments.done":
 
 		case "response.completed":
+			var messageContent any
 			if streamResp.Response != nil {
 				if streamResp.Response.Model != "" {
 					model = streamResp.Response.Model
@@ -473,9 +546,17 @@ func OaiResponsesToChatStreamHandler(c *gin.Context, info *relaycommon.RelayInfo
 						usage.CompletionTokenDetails.ReasoningTokens = streamResp.Response.Usage.CompletionTokenDetails.ReasoningTokens
 					}
 				}
+				messageContent = service.BuildChatCompletionsMessageContentFromResponses(streamResp.Response)
+			}
+			if !hasImageMessageContent(messageContent) && len(collectedOutputs) > 0 {
+				messageContent = service.BuildChatCompletionsMessageContentFromResponsesOutputs(collectedOutputs, outputText.String())
 			}
 
 			if !sendStartIfNeeded() {
+				sr.Stop(streamErr)
+				return
+			}
+			if !sendMessageContentChunk(messageContent) {
 				sr.Stop(streamErr)
 				return
 			}

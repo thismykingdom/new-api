@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"os"
 	"strings"
 
 	"github.com/QuantumNous/new-api/common"
@@ -396,7 +397,34 @@ func ChatCompletionsRequestToResponsesRequest(req *dto.GeneralOpenAIRequest) (*d
 			Effort:  req.ReasoningEffort,
 			Summary: "detailed",
 		}
+	} else if summary := defaultResponsesReasoningSummary(req.Model); summary != "" {
+		out.Reasoning = &dto.Reasoning{
+			Summary: summary,
+		}
 	}
 
 	return out, nil
+}
+
+func defaultResponsesReasoningSummary(model string) string {
+	configured := strings.ToLower(strings.TrimSpace(os.Getenv("RESPONSES_REASONING_SUMMARY")))
+	switch configured {
+	case "off", "none", "disabled", "false", "0":
+		return ""
+	case "auto", "":
+		if supportsReasoningSummaryByDefault(model) {
+			return "detailed"
+		}
+		return ""
+	default:
+		return configured
+	}
+}
+
+func supportsReasoningSummaryByDefault(model string) bool {
+	normalized := strings.ToLower(strings.TrimSpace(model))
+	return strings.HasPrefix(normalized, "gpt-5") ||
+		strings.HasPrefix(normalized, "o1") ||
+		strings.HasPrefix(normalized, "o3") ||
+		strings.HasPrefix(normalized, "o4")
 }
